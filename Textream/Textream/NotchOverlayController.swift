@@ -683,6 +683,7 @@ struct NotchOverlayView: View {
 
     // Timer-based scroll for classic & silence-paused modes
     @State private var timerWordProgress: Double = 0
+    @State private var nearEndTicks: Int = 0
     @State private var isPaused: Bool = false
     @State private var isUserScrolling: Bool = false
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
@@ -880,7 +881,22 @@ struct NotchOverlayView: View {
                     timerWordProgress += speed * 0.05
                 }
             case .wordTracking:
-                break
+                // Grace finish: the recognizer often hears the closing words
+                // differently and never crosses the finish line. If the
+                // highlight sits within the last couple of words and stalls,
+                // complete the script so the done flow can run.
+                let rec = speechRecognizer.recognizedCharCount
+                let tailLen = words.suffix(2).reduce(0) { $0 + $1.count + 1 }
+                if speechRecognizer.isListening && totalCharCount > 0
+                    && rec < totalCharCount && totalCharCount - rec <= tailLen {
+                    nearEndTicks += 1
+                    if nearEndTicks >= 50 { // ~2.5s at 20Hz
+                        nearEndTicks = 0
+                        speechRecognizer.jumpTo(charOffset: totalCharCount)
+                    }
+                } else {
+                    nearEndTicks = 0
+                }
             }
         }
         .onChange(of: content.totalCharCount) { _, _ in
@@ -1239,6 +1255,7 @@ struct FloatingOverlayView: View {
 
     // Timer-based scroll for classic & silence-paused modes
     @State private var timerWordProgress: Double = 0
+    @State private var nearEndTicks: Int = 0
     @State private var isPaused: Bool = false
     @State private var isUserScrolling: Bool = false
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
@@ -1377,7 +1394,22 @@ struct FloatingOverlayView: View {
                     timerWordProgress += speed * 0.05
                 }
             case .wordTracking:
-                break
+                // Grace finish: the recognizer often hears the closing words
+                // differently and never crosses the finish line. If the
+                // highlight sits within the last couple of words and stalls,
+                // complete the script so the done flow can run.
+                let rec = speechRecognizer.recognizedCharCount
+                let tailLen = words.suffix(2).reduce(0) { $0 + $1.count + 1 }
+                if speechRecognizer.isListening && totalCharCount > 0
+                    && rec < totalCharCount && totalCharCount - rec <= tailLen {
+                    nearEndTicks += 1
+                    if nearEndTicks >= 50 { // ~2.5s at 20Hz
+                        nearEndTicks = 0
+                        speechRecognizer.jumpTo(charOffset: totalCharCount)
+                    }
+                } else {
+                    nearEndTicks = 0
+                }
             }
         }
         .onChange(of: content.totalCharCount) { _, _ in
