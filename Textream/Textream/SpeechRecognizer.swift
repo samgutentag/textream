@@ -611,9 +611,93 @@ class SpeechRecognizer {
         preemptiveRestartTimer = nil
     }
 
+    // MARK: - Backward re-localization (prototype)
+
+    /// Detect that the speaker has gone back and is rereading an earlier
+    /// passage. The normal pipeline is forward-only (matching starts at
+    /// matchStartOffset and recognizedCharCount never decreases), so rereads
+    /// otherwise bind to similar-sounding upcoming words. Compares the last
+    /// few spoken words against a window behind and ahead of the current
+    /// position and jumps back only when the backward alignment is strong and
+    /// strictly better than the forward one (ties resolve forward so repeated
+    /// phrases don't yank the highlight around). The backward window excludes
+    /// the words immediately behind the cursor — during normal reading the
+    /// spoken tail always matches those, and they must not trigger a jump.
+    private func attemptBackwardRelocalization(spoken: String) -> Bool {
+        guard recognizedCharCount > 100 else { return false }
+
+        let tail = Array(
+            spoken.lowercased().split(separator: " ")
+                .map { String($0).filter { $0.isLetter || $0.isNumber } }
+                .filter { !$0.isEmpty }
+                .suffix(6)
+        )
+        guard tail.count >= 4 else { return false }
+
+        let sourceWords = sourceText.split(separator: " ").map(String.init)
+        var offsets: [Int] = []
+        var off = 0
+        for w in sourceWords {
+            offsets.append(off)
+            off += w.count + 1
+        }
+        guard let currentIdx = offsets.lastIndex(where: { $0 <= recognizedCharCount }) else { return false }
+
+        let recentExclusion = 8 // words just behind the cursor stay off-limits
+        let backStart = offsets.firstIndex(where: { $0 >= recognizedCharCount - 600 }) ?? 0
+        let backEnd = max(backStart, currentIdx - recentExclusion)
+        let backRange = backStart..<backEnd
+        let fwdEnd = offsets.firstIndex(where: { $0 > recognizedCharCount + 600 }) ?? sourceWords.count
+        let fwdRange = currentIdx..<fwdEnd
+        guard backRange.count >= tail.count else { return false }
+
+        func bestAlignment(in range: Range<Int>) -> (score: Int, endIdx: Int)? {
+            var best: (score: Int, endIdx: Int)? = nil
+            for start in range {
+                var ti = 0
+                var si = start
+                var skips = 0
+                var lastMatch = start
+                while ti < tail.count && si < sourceWords.count && skips <= 2 {
+                    let src = sourceWords[si].lowercased().filter { $0.isLetter || $0.isNumber }
+                    if src.isEmpty || Self.isAnnotationWord(sourceWords[si]) {
+                        si += 1
+                        continue
+                    }
+                    if isFuzzyMatch(src, tail[ti]) {
+                        lastMatch = si
+                        ti += 1
+                        si += 1
+                    } else {
+                        skips += 1
+                        si += 1
+                    }
+                }
+                if ti > (best?.score ?? 0) {
+                    best = (ti, lastMatch)
+                }
+            }
+            return best
+        }
+
+        guard let back = bestAlignment(in: backRange), back.score >= tail.count - 1 else { return false }
+        let fwdScore = fwdRange.isEmpty ? 0 : (bestAlignment(in: fwdRange)?.score ?? 0)
+        guard back.score > fwdScore else { return false }
+
+        let endOffset = offsets[back.endIdx] + sourceWords[back.endIdx].count
+        guard endOffset < recognizedCharCount - 30 else { return false }
+
+        jumpTo(charOffset: min(endOffset, sourceText.count))
+        return true
+    }
+
     // MARK: - Fuzzy character-level matching
 
     private func matchCharacters(spoken: String) {
+        // A confident reread of an earlier passage takes priority over
+        // forward matching (which cannot represent it).
+        if attemptBackwardRelocalization(spoken: spoken) { return }
+
         // Strategy 1: character-level fuzzy match from the start offset
         let charResult = charLevelMatch(spoken: spoken)
 

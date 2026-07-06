@@ -412,8 +412,48 @@ class NotchOverlayController: NSObject {
                 self.dismiss()
                 return nil
             }
+            if event.keyCode == 123 { // left arrow
+                self.stepWord(-1)
+                return nil
+            }
+            if event.keyCode == 124 { // right arrow
+                self.stepWord(1)
+                return nil
+            }
             return event
         }
+    }
+
+    /// Nudge the word-tracking position one word back/forward. Right arrow on
+    /// the final word completes the script — the recognizer sometimes hears
+    /// the last words differently and never crosses the finish line, so this
+    /// is the manual escape hatch.
+    private func stepWord(_ direction: Int) {
+        guard NotchSettings.shared.listeningMode == .wordTracking else { return }
+        let words = overlayContent.words
+        guard !words.isEmpty else { return }
+
+        var offsets: [Int] = []
+        var off = 0
+        for w in words {
+            offsets.append(off)
+            off += w.count + 1
+        }
+
+        let count = speechRecognizer.recognizedCharCount
+        var currentIdx = words.count - 1
+        for (i, w) in words.enumerated() where count <= offsets[i] + w.count {
+            currentIdx = i
+            break
+        }
+
+        if direction > 0 && currentIdx == words.count - 1 {
+            // Complete the script (fires the done flow)
+            speechRecognizer.jumpTo(charOffset: overlayContent.totalCharCount)
+            return
+        }
+        let target = max(0, min(words.count - 1, currentIdx + direction))
+        speechRecognizer.jumpTo(charOffset: offsets[target])
     }
 
     private func forceClose() {

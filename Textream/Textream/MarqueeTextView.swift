@@ -443,7 +443,7 @@ struct WordFlowLayout: View {
         ZStack {
             if pill {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(highlightColor.opacity(0.22))
+                    .fill(Color.yellow.opacity(0.3))
                     .padding(.trailing, trailingSpaceWidth)
             }
             GeometryReader { wordGeo in
@@ -495,11 +495,13 @@ struct WordFlowLayout: View {
                 }
         }
 
-        // Current word: full brightness on a pill so it stands out from
-        // unread text; read words dim. Bold weight would widen the word and
-        // nudge the rest of the line on every advance, so the pill carries
-        // the emphasis instead.
-        let wordColor: Color = isFullyLit ? highlightColor.opacity(0.3) : highlightColor
+        // Current word: yellow on a yellow pill so it stands out from unread
+        // text; read words dim. Bold weight would widen the word and nudge
+        // the rest of the line on every advance, so color carries the
+        // emphasis instead.
+        let wordColor: Color = isFullyLit
+            ? highlightColor.opacity(0.3)
+            : (isCurrentWord ? .yellow : highlightColor)
 
         return Text(item.word + " ")
             .font(Font(font))
