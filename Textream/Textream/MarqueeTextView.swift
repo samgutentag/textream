@@ -137,9 +137,9 @@ struct SpeechScrollView: View {
             .onChange(of: geo.size.height) { _, newHeight in
                 containerHeight = newHeight
                 if highlightedCharCount == 0 && smoothWordProgress == 0 {
-                    // Initial state: center first line on screen
+                    // Initial state: first line at the reading anchor
                     let lineHeight = font.pointSize * 1.4
-                    scrollOffset = newHeight * 0.5 - lineHeight * 0.5
+                    scrollOffset = readingAnchorY(containerHeight: newHeight) - lineHeight * 0.5
                 } else if isListening {
                     recalcCenter(containerHeight: newHeight)
                 }
@@ -163,17 +163,17 @@ struct SpeechScrollView: View {
                 }
             }
             .onChange(of: words) { _, _ in
-                // First line at vertical center: height/2 + lineHeight/2
+                // First line at the reading anchor
                 let lineHeight = font.pointSize * 1.4
-                scrollOffset = containerHeight * 0.5 - lineHeight * 0.5
+                scrollOffset = readingAnchorY(containerHeight: containerHeight) - lineHeight * 0.5
                 manualOffset = 0
                 wordYPositions = [:]
             }
             .onAppear {
                 containerHeight = geo.size.height
-                // First line at vertical center: height/2 + lineHeight/2
+                // First line at the reading anchor
                 let lineHeight = font.pointSize * 1.4
-                scrollOffset = containerHeight * 0.5 - lineHeight * 0.5
+                scrollOffset = readingAnchorY(containerHeight: containerHeight) - lineHeight * 0.5
             }
             .overlay(
                 ScrollWheelView(
@@ -250,10 +250,11 @@ struct SpeechScrollView: View {
     /// Smooth modes (classic/silence-paused) anchor in the lower third so read
     /// text stays visible above while the next lines remain visible below —
     /// anchoring at the very bottom leaves the speaker no lookahead.
-    /// wordProgressAtCurrentOffset must use the same anchor, otherwise
-    /// releasing a manual scroll snaps the text by the difference.
+    /// Word tracking anchors in the upper third so most of the window shows
+    /// upcoming text. wordProgressAtCurrentOffset must use the same anchor,
+    /// otherwise releasing a manual scroll snaps the text by the difference.
     private func readingAnchorY(containerHeight: CGFloat) -> CGFloat {
-        smoothScroll ? containerHeight * 0.7 : containerHeight * 0.5
+        smoothScroll ? containerHeight * 0.7 : containerHeight * 0.35
     }
 
     private func recalcCenter(containerHeight: CGFloat) {
@@ -429,6 +430,31 @@ struct WordFlowLayout: View {
         .coordinateSpace(name: "flowLayout")
     }
 
+    private var trailingSpaceWidth: CGFloat {
+        (" " as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    /// Shared background for every word: reports the word's Y position and
+    /// draws the current-word pill when requested. Every wordView branch must
+    /// go through this same builder — the branches are alternate returns of
+    /// one `some View` function, so their view types have to stay identical.
+    @ViewBuilder
+    private func wordBackground(for item: WordItem, pill: Bool) -> some View {
+        ZStack {
+            if pill {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(highlightColor.opacity(0.22))
+                    .padding(.trailing, trailingSpaceWidth)
+            }
+            GeometryReader { wordGeo in
+                Color.clear.preference(
+                    key: WordYPreferenceKey.self,
+                    value: [item.id: wordGeo.frame(in: .named("flowLayout")).midY]
+                )
+            }
+        }
+    }
+
     private func wordView(for item: WordItem, isNextWord: Bool) -> some View {
         let wordLen = item.word.count
         let charsIntoWord = highlightedCharCount - item.charOffset
@@ -446,14 +472,7 @@ struct WordFlowLayout: View {
             return Text(item.word + " ")
                 .font(item.isAnnotation ? Font(font).italic() : Font(font))
                 .foregroundStyle(uniformColor)
-                .background(
-                    GeometryReader { wordGeo in
-                        Color.clear.preference(
-                            key: WordYPreferenceKey.self,
-                            value: [item.id: wordGeo.frame(in: .named("flowLayout")).midY]
-                        )
-                    }
-                )
+                .background(wordBackground(for: item, pill: false))
                 .contentShape(Rectangle())
                 .onTapGesture {
                     onWordTap?(item.charOffset)
@@ -469,40 +488,24 @@ struct WordFlowLayout: View {
             return Text(item.word + " ")
                 .font(Font(font).italic())
                 .foregroundStyle(annotationColor)
-                .background(
-                    GeometryReader { wordGeo in
-                        Color.clear.preference(
-                            key: WordYPreferenceKey.self,
-                            value: [item.id: wordGeo.frame(in: .named("flowLayout")).midY]
-                        )
-                    }
-                )
+                .background(wordBackground(for: item, pill: false))
                 .contentShape(Rectangle())
                 .onTapGesture {
                     onWordTap?(item.charOffset)
                 }
         }
 
-        // Dim color: highlight color variant for current word, full for unread
-        let dimColor: Color = isCurrentWord
-            ? highlightColor.opacity(0.6)
-            : highlightColor
-
-        // Base color for the whole word
-        let wordColor: Color = isFullyLit ? highlightColor.opacity(0.3) : dimColor
+        // Current word: full brightness on a pill so it stands out from
+        // unread text; read words dim. Bold weight would widen the word and
+        // nudge the rest of the line on every advance, so the pill carries
+        // the emphasis instead.
+        let wordColor: Color = isFullyLit ? highlightColor.opacity(0.3) : highlightColor
 
         return Text(item.word + " ")
             .font(Font(font))
             .foregroundStyle(wordColor)
             .underline(isCurrentWord, color: wordColor)
-            .background(
-                GeometryReader { wordGeo in
-                    Color.clear.preference(
-                        key: WordYPreferenceKey.self,
-                        value: [item.id: wordGeo.frame(in: .named("flowLayout")).midY]
-                    )
-                }
-            )
+            .background(wordBackground(for: item, pill: isCurrentWord))
             .contentShape(Rectangle())
             .onTapGesture {
                 onWordTap?(item.charOffset)
