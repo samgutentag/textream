@@ -26,12 +26,23 @@ xcodebuild -project "$PROJECT_DIR/Textream.xcodeproj" -scheme Textream \
   MARKETING_VERSION="$LOCAL_VERSION" build -quiet
 
 BUILT="$DERIVED/Build/Products/Release/Textream.app"
+
+# Label the fork build "Textream Dev" so it's obvious which app is running.
+# Bundle id and executable name stay unchanged (settings and permissions
+# carry over; pkill below matches the executable name).
+/usr/libexec/PlistBuddy -c "Set :CFBundleName Textream Dev" "$BUILT/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Textream Dev" "$BUILT/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Textream Dev" "$BUILT/Contents/Info.plist"
 codesign --force -s - "$BUILT"
 
+osascript -e 'quit app "Textream Dev"' 2>/dev/null || true
 osascript -e 'quit app "Textream"' 2>/dev/null || true
 pkill -x Textream 2>/dev/null || true
 sleep 1
 rm -rf "$APP"
 ditto "$BUILT" "$APP"
-echo "Installed $APP (${LOCAL_VERSION})"
+# Remove the build-products copy so only /Applications holds an installable
+# app (a second copy confuses Spotlight and humans alike)
+rm -rf "$BUILT"
+echo "Installed $APP (${LOCAL_VERSION}, shown as \"Textream Dev\")"
 open "$APP"
