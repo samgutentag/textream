@@ -154,15 +154,27 @@ class SpeechRecognizer {
         let clampedOffset = max(0, min(charOffset, sourceText.count))
         let targetOffset = advancePastAnnotations(from: clampedOffset)
         let distance = abs(targetOffset - recognizedCharCount)
-        recognizedCharCount = targetOffset
-        matchStartOffset = targetOffset
-        recentMatchPositions = []
         if isListening && (distance > 500 || !audioEngine.isRunning) {
             // Far jump, or the engine died without a config-change callback —
             // fall back to a full restart (also refreshes contextualStrings).
+            recognizedCharCount = targetOffset
+            matchStartOffset = targetOffset
+            recentMatchPositions = []
             restartRecognition(resetRetryCount: false)
             return
         }
+        anchorJump(to: targetOffset)
+    }
+
+    /// Keep-alive jump: reposition and anchor matching past the transcript so
+    /// far, without restarting the task. Used directly by backward
+    /// re-localization, which fires mid-speech — a restart there would drop
+    /// exactly the words being spoken. Callers pass an already-clamped,
+    /// annotation-advanced offset.
+    private func anchorJump(to targetOffset: Int) {
+        recognizedCharCount = targetOffset
+        matchStartOffset = targetOffset
+        recentMatchPositions = []
         spokenAnchorPrefix = lastSpokenText
         lastJumpAt = Date()
     }
@@ -768,6 +780,86 @@ class SpeechRecognizer {
 
     // MARK: - Fuzzy character-level matching
 
+    // MARK: - Backward re-localization (prototype)
+
+    /// Detect that the speaker has gone back and is rereading an earlier
+    /// passage. The normal pipeline is forward-only (matching starts at
+    /// matchStartOffset and recognizedCharCount never decreases), so rereads
+    /// otherwise bind to similar-sounding upcoming words. Compares the last
+    /// few spoken words against a window behind and ahead of the current
+    /// position and jumps back only when the backward alignment is strong and
+    /// strictly better than the forward one (ties resolve forward so repeated
+    /// phrases don't yank the highlight around). The backward window excludes
+    /// the words immediately behind the cursor — during normal reading the
+    /// spoken tail always matches those, and they must not trigger a jump.
+    private func attemptBackwardRelocalization(spoken: String) -> Bool {
+        guard recognizedCharCount > 100 else { return false }
+
+        let tail = Array(
+            spoken.lowercased().split(separator: " ")
+                .map { String($0).filter { $0.isLetter || $0.isNumber } }
+                .filter { !$0.isEmpty }
+                .suffix(6)
+        )
+        guard tail.count >= 4 else { return false }
+
+        let sourceWords = sourceText.split(separator: " ").map(String.init)
+        var offsets: [Int] = []
+        var off = 0
+        for w in sourceWords {
+            offsets.append(off)
+            off += w.count + 1
+        }
+        guard let currentIdx = offsets.lastIndex(where: { $0 <= recognizedCharCount }) else { return false }
+
+        let recentExclusion = 8 // words just behind the cursor stay off-limits
+        let backStart = offsets.firstIndex(where: { $0 >= recognizedCharCount - 600 }) ?? 0
+        let backEnd = max(backStart, currentIdx - recentExclusion)
+        let backRange = backStart..<backEnd
+        let fwdEnd = offsets.firstIndex(where: { $0 > recognizedCharCount + 600 }) ?? sourceWords.count
+        let fwdRange = currentIdx..<fwdEnd
+        guard backRange.count >= tail.count else { return false }
+
+        func bestAlignment(in range: Range<Int>) -> (score: Int, endIdx: Int)? {
+            var best: (score: Int, endIdx: Int)? = nil
+            for start in range {
+                var ti = 0
+                var si = start
+                var skips = 0
+                var lastMatch = start
+                while ti < tail.count && si < sourceWords.count && skips <= 2 {
+                    let src = sourceWords[si].lowercased().filter { $0.isLetter || $0.isNumber }
+                    if src.isEmpty || Self.isAnnotationWord(sourceWords[si]) {
+                        si += 1
+                        continue
+                    }
+                    if isFuzzyMatch(src, tail[ti]) {
+                        lastMatch = si
+                        ti += 1
+                        si += 1
+                    } else {
+                        skips += 1
+                        si += 1
+                    }
+                }
+                if ti > (best?.score ?? 0) {
+                    best = (ti, lastMatch)
+                }
+            }
+            return best
+        }
+
+        guard let back = bestAlignment(in: backRange), back.score >= tail.count - 1 else { return false }
+        let fwdScore = fwdRange.isEmpty ? 0 : (bestAlignment(in: fwdRange)?.score ?? 0)
+        guard back.score > fwdScore else { return false }
+
+        let endOffset = offsets[back.endIdx] + sourceWords[back.endIdx].count
+        guard endOffset < recognizedCharCount - 30 else { return false }
+
+        anchorJump(to: advancePastAnnotations(from: max(0, min(endOffset, sourceText.count))))
+        return true
+    }
+
     private func matchCharacters(spoken fullSpoken: String) {
         // Results computed before a jump can be delivered just after it —
         // don't match pre-jump speech against the text at the new offset.
@@ -785,6 +877,10 @@ class SpeechRecognizer {
             spoken = String(fullSpoken.dropFirst(trimLen))
         }
         guard !spoken.isEmpty else { return }
+
+        // A confident reread of an earlier passage takes priority over
+        // forward matching (which cannot represent it).
+        if attemptBackwardRelocalization(spoken: spoken) { return }
 
         // Strategy 1: character-level fuzzy match from the start offset
         let charResult = charLevelMatch(spoken: spoken)
