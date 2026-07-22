@@ -99,6 +99,11 @@ struct SpeechScrollView: View {
     @State private var wordYPositions: [Int: CGFloat] = [:]
     @State private var containerHeight: CGFloat = 0
     @State private var isUserScrolling: Bool = false
+    /// Word tracking only: the user has scrolled back to line up another take.
+    /// While browsing, live auto-recentering is suspended so the recognizer
+    /// can't yank the view off the passage being aimed at. Ends when the user
+    /// taps a word (jump there) or scrolls back down to the live position.
+    @State private var isBrowsing: Bool = false
 
     var body: some View {
         GeometryReader { geo in
@@ -113,7 +118,22 @@ struct SpeechScrollView: View {
                 highlightWords: !smoothScroll,
                 containerWidth: geo.size.width,
                 onWordTap: { charOffset in
-                    manualOffset = 0
+                    // Tapping commits. When browsing, fold the scroll-back offset
+                    // into scrollOffset with no visual move (otherwise manualOffset
+                    // snaps to the live position first, then scrollOffset slides to
+                    // the tapped word — a two-stage jump). The jump's recenter then
+                    // animates exactly once, straight to the tapped word.
+                    if isBrowsing {
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) {
+                            scrollOffset += manualOffset
+                            manualOffset = 0
+                        }
+                        isBrowsing = false
+                    } else {
+                        manualOffset = 0
+                    }
                     onWordTap?(charOffset)
                     // Recentering on the tapped word is driven by the jump:
                     // .onChange(of: highlightedCharCount) for near jumps (task
@@ -148,7 +168,7 @@ struct SpeechScrollView: View {
                 }
             }
             .onChange(of: highlightedCharCount) { _, _ in
-                if isListening && !smoothScroll {
+                if isListening && !smoothScroll && !isBrowsing {
                     manualOffset = 0
                     recalcCenter(containerHeight: containerHeight)
                 }
@@ -160,7 +180,7 @@ struct SpeechScrollView: View {
                 }
             }
             .onChange(of: isListening) { _, listening in
-                if listening {
+                if listening && !isBrowsing {
                     manualOffset = 0
                     recalcCenter(containerHeight: containerHeight)
                 }
@@ -171,6 +191,7 @@ struct SpeechScrollView: View {
                 scrollOffset = readingAnchorY(containerHeight: containerHeight) - lineHeight * 0.5
                 manualOffset = 0
                 wordYPositions = [:]
+                isBrowsing = false // new script/page: drop any in-progress browse
             }
             .onAppear {
                 containerHeight = geo.size.height
@@ -181,52 +202,63 @@ struct SpeechScrollView: View {
             .overlay(
                 ScrollWheelView(
                     onScroll: { delta in
-                        let canScroll = smoothScroll ? isListening : !isListening
-                        guard canScroll else { return }
-
-                        // Pause timer when user starts scrolling in smooth mode
-                        if smoothScroll && !isUserScrolling {
-                            isUserScrolling = true
-                            onManualScroll?(true, 0)
-                        }
-
-                        let maxY = wordYPositions.values.max() ?? 0
-                        let containerHeight = geo.size.height
-                        let maxUp = containerHeight * 0.5
-                        let maxDown = max(0, maxY - containerHeight * 0.5)
-
-                        let newOffset = manualOffset + delta
-                        let upperBound = maxUp
-                        let lowerBound = -maxDown
-
-                        if newOffset > upperBound {
-                            let over = newOffset - upperBound
-                            manualOffset = upperBound + over * 0.2
-                        } else if newOffset < lowerBound {
-                            let over = lowerBound - newOffset
-                            manualOffset = lowerBound - over * 0.2
+                        let containerH = geo.size.height
+                        if smoothScroll {
+                            guard isListening else { return }
+                            // Pause timer when user starts scrolling in smooth mode
+                            if !isUserScrolling {
+                                isUserScrolling = true
+                                onManualScroll?(true, 0)
+                            }
+                            let maxY = wordYPositions.values.max() ?? 0
+                            let maxUp = containerH * 0.5
+                            let maxDown = max(0, maxY - containerH * 0.5)
+                            manualOffset = rubberBand(manualOffset + delta, lower: -maxDown, upper: maxUp)
                         } else {
-                            manualOffset = newOffset
+                            // Word tracking: browse to line up another take, in
+                            // either direction, even while listening. Tap a word
+                            // to commit. manualOffset > 0 reveals earlier text,
+                            // < 0 reveals later text.
+                            isBrowsing = true
+                            isUserScrolling = true
+                            let anchor = readingAnchorY(containerHeight: containerH)
+                            let maxY = wordYPositions.values.max() ?? 0
+                            // Up: first line reaches the anchor. Down: last
+                            // rendered line reaches the anchor (grows as scrolling
+                            // reveals more of the script).
+                            let upperBound = max(0, anchor - scrollOffset)
+                            let lowerBound = min(-containerH, anchor - maxY - scrollOffset)
+                            manualOffset = rubberBand(manualOffset + delta, lower: lowerBound, upper: upperBound)
                         }
                     },
                     onScrollEnd: {
-                        if smoothScroll && isUserScrolling {
-                            // Find the word at the new visual center
-                            let newProgress = wordProgressAtCurrentOffset()
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                manualOffset = 0
+                        if smoothScroll {
+                            if isUserScrolling {
+                                // Find the word at the new visual center
+                                let newProgress = wordProgressAtCurrentOffset()
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    manualOffset = 0
+                                }
+                                isUserScrolling = false
+                                onManualScroll?(false, newProgress)
                             }
-                            isUserScrolling = false
-                            onManualScroll?(false, newProgress)
                         } else {
+                            isUserScrolling = false
+                            let containerH = geo.size.height
+                            let anchor = readingAnchorY(containerHeight: containerH)
                             let maxY = wordYPositions.values.max() ?? 0
-                            let containerHeight = geo.size.height
-                            let upperBound = containerHeight * 0.5
-                            let lowerBound = -max(0, maxY - containerHeight * 0.5)
-
-                            if manualOffset > upperBound || manualOffset < lowerBound {
+                            let upperBound = max(0, anchor - scrollOffset)
+                            let lowerBound = min(-containerH, anchor - maxY - scrollOffset)
+                            let clamped = min(upperBound, max(lowerBound, manualOffset))
+                            if abs(clamped) <= 4 {
+                                // Settled back at the live position (either
+                                // direction): resume live tracking.
+                                isBrowsing = false
+                                withAnimation(.easeOut(duration: 0.15)) { manualOffset = 0 }
+                                recalcCenter(containerHeight: containerH)
+                            } else {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    manualOffset = min(upperBound, max(lowerBound, manualOffset))
+                                    manualOffset = clamped
                                 }
                             }
                         }
@@ -258,6 +290,14 @@ struct SpeechScrollView: View {
     /// otherwise releasing a manual scroll snaps the text by the difference.
     private func readingAnchorY(containerHeight: CGFloat) -> CGFloat {
         smoothScroll ? containerHeight * 0.7 : containerHeight * 0.35
+    }
+
+    /// Clamp a scroll offset to [lower, upper], damping travel past a bound to
+    /// 20% so the edges rubber-band instead of hard-stopping.
+    private func rubberBand(_ value: CGFloat, lower: CGFloat, upper: CGFloat) -> CGFloat {
+        if value > upper { return upper + (value - upper) * 0.2 }
+        if value < lower { return lower - (lower - value) * 0.2 }
+        return value
     }
 
     private func recalcCenter(containerHeight: CGFloat) {
