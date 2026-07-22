@@ -115,10 +115,13 @@ struct SpeechScrollView: View {
                 onWordTap: { charOffset in
                     manualOffset = 0
                     onWordTap?(charOffset)
-                    // Force recenter on tapped word
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        recalcCenter(containerHeight: containerHeight)
-                    }
+                    // Recentering on the tapped word is driven by the jump:
+                    // .onChange(of: highlightedCharCount) for near jumps (task
+                    // stays alive) and .onChange(of: isListening) for far jumps
+                    // that restart the task. A delayed asyncAfter recalc here
+                    // captured a stale highlightedCharCount (the pre-tap value)
+                    // and scrolled back to the old position — the "inverted
+                    // scroll" on tap-to-jump.
                 },
                 scrollOffset: scrollOffset + manualOffset,
                 viewportHeight: geo.size.height
