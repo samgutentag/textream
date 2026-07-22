@@ -447,20 +447,28 @@ class NotchOverlayController: NSObject {
             off += w.count + 1
         }
 
+        // Step only across spoken words. Stage directions ([...]) are never
+        // read aloud, and jumpTo advances past annotation ranges anyway, so
+        // targeting one would stick (backward) or overshoot (forward). Hop
+        // over them to the adjacent real word in both directions.
+        let annotationFlags = SpeechTextAlignment.annotationFlags(for: words)
+        let readable = words.indices.filter { !annotationFlags[$0] }
+        guard !readable.isEmpty else { return }
+
         let count = speechRecognizer.recognizedCharCount
-        var currentIdx = words.count - 1
-        for (i, w) in words.enumerated() where count <= offsets[i] + w.count {
-            currentIdx = i
+        var currentPos = readable.count - 1
+        for (pos, i) in readable.enumerated() where count <= offsets[i] + words[i].count {
+            currentPos = pos
             break
         }
 
-        if direction > 0 && currentIdx == words.count - 1 {
-            // Complete the script (fires the done flow)
+        if direction > 0 && currentPos == readable.count - 1 {
+            // Past the last spoken word: complete the script (fires the done flow).
             speechRecognizer.jumpTo(charOffset: overlayContent.totalCharCount)
             return
         }
-        let target = max(0, min(words.count - 1, currentIdx + direction))
-        speechRecognizer.jumpTo(charOffset: offsets[target])
+        let targetPos = max(0, min(readable.count - 1, currentPos + direction))
+        speechRecognizer.jumpTo(charOffset: offsets[readable[targetPos]])
     }
 
     private func forceClose() {
